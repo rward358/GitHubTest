@@ -37,14 +37,108 @@ class RecipeExtractor:
         self.images_dir = self.output_dir / "images"
         self.images_dir.mkdir(exist_ok=True)
 
-    def extract_images_from_pdf(self, pdf_path: str, recipe_name: str) -> List[str]:
+    @staticmethod
+    def sanitize_filename(name: str) -> str:
+        """Convert a title to a safe filename."""
+        # Remove or replace invalid filename characters
+        name = re.sub(r'[<>:"/\\|?*]', '', name)
+        # Replace spaces and multiple spaces with single underscore
+        name = re.sub(r'\s+', '_', name.strip())
+        # Limit length
+        name = name[:100]
+        return name or "untitled_recipe"
+
+    def extract_title_from_first_page(self, pdf_path: str) -> str:
+        """
+        Extract the recipe title from the first page.
+        Looks for bold text at the top of the page.
+        """
+        if not fitz:
+            # Fallback to simple text extraction
+            return self._extract_title_fallback(pdf_path)
+
+        try:
+            doc = fitz.open(pdf_path)
+            if len(doc) == 0:
+                doc.close()
+                return "Untitled Recipe"
+
+            first_page = doc[0]
+
+            # Method 1: Look for bold text using font information
+            blocks = first_page.get_text("dict")["blocks"]
+            bold_texts = []
+
+            for block in blocks:
+                if "lines" in block:
+                    for line in block["lines"]:
+                        for span in line["spans"]:
+                            text = span["text"].strip()
+                            font = span.get("font", "").lower()
+                            size = span.get("size", 0)
+
+                            # Check if font is bold (contains "bold" in name)
+                            # and text is substantial (not just punctuation)
+                            if text and len(text) > 3:
+                                is_bold = "bold" in font or "heavy" in font or "black" in font
+                                is_large = size > 12  # Larger font size
+
+                                if is_bold or is_large:
+                                    y_position = span.get("bbox", [0, 0, 0, 0])[1]
+                                    bold_texts.append({
+                                        'text': text,
+                                        'size': size,
+                                        'y_pos': y_position,
+                                        'is_bold': is_bold
+                                    })
+
+            # Sort by y-position (top to bottom) and size (largest first)
+            if bold_texts:
+                bold_texts.sort(key=lambda x: (x['y_pos'], -x['size']))
+                # Get the first (topmost, largest) bold text
+                title = bold_texts[0]['text']
+                doc.close()
+                return title
+
+            # Method 2: Fallback - get first substantial line
+            text = first_page.get_text()
+            lines = [line.strip() for line in text.split('\n') if line.strip()]
+            if lines:
+                # Find first line that's not too short or too long
+                for line in lines[:5]:  # Check first 5 lines
+                    if 5 < len(line) < 100:
+                        doc.close()
+                        return line
+
+            doc.close()
+
+        except Exception as e:
+            print(f"Error extracting title from {pdf_path}: {e}")
+
+        return self._extract_title_fallback(pdf_path)
+
+    def _extract_title_fallback(self, pdf_path: str) -> str:
+        """Fallback method to extract title from text."""
+        text = self.extract_text_from_pdf(pdf_path)
+        lines = [line.strip() for line in text.split('\n') if line.strip()]
+
+        # Get first substantial line
+        for line in lines[:5]:
+            if 5 < len(line) < 100:
+                return line
+
+        return Path(pdf_path).stem.replace('_', ' ').replace('-', ' ')
+
+    def extract_images_from_pdf(self, pdf_path: str, recipe_title: str) -> List[str]:
         """
         Extract the main dish image from a PDF file.
 
         Filters out small ingredient photos and icons by looking for:
         - Large file size (>50KB indicates a high-quality photo)
         - Reasonable dimensions (minimum 300x300 pixels)
-        - Returns only the largest image (the main dish photo)
+        - Returns only ONE image: the largest (best quality main dish photo)
+
+        The image is named based on the recipe title extracted from the first page.
         """
         if not fitz:
             print("PyMuPDF not available, skipping image extraction")
@@ -82,15 +176,10 @@ class RecipeExtractor:
                         height >= MIN_DIMENSION and
                         0.5 <= aspect_ratio <= 2.0):  # Reasonable aspect ratio
 
-                        image_filename = f"{recipe_name}_page{page_num}_img{img_index}.{image_ext}"
-                        image_path = self.images_dir / image_filename
-
-                        with open(image_path, "wb") as img_file:
-                            img_file.write(image_bytes)
-
-                        # Store with metadata for better selection
+                        # Store with metadata for selection (will save only the largest)
                         candidate_images.append({
-                            'path': str(image_path),
+                            'bytes': image_bytes,
+                            'ext': image_ext,
                             'size': file_size,
                             'width': width,
                             'height': height,
@@ -99,10 +188,18 @@ class RecipeExtractor:
 
             doc.close()
 
-            # Select the largest image by file size (best quality main dish photo)
+            # Select and save only the largest image by file size (best quality main dish photo)
             if candidate_images:
                 largest_img = max(candidate_images, key=lambda x: x['size'])
-                return [largest_img['path']]
+
+                # Save with recipe title as filename
+                image_filename = f"{recipe_title}.{largest_img['ext']}"
+                image_path = self.images_dir / image_filename
+
+                with open(image_path, "wb") as img_file:
+                    img_file.write(largest_img['bytes'])
+
+                return [str(image_path)]
 
         except Exception as e:
             print(f"Error extracting images from {pdf_path}: {e}")
@@ -226,22 +323,28 @@ class RecipeExtractor:
         """Process a single PDF file and extract recipe information."""
         print(f"Processing: {pdf_path}")
 
-        # Generate recipe name from filename
-        recipe_name = Path(pdf_path).stem.replace('_', ' ').replace('-', ' ')
+        # Extract title from first page (bold text at the top)
+        title = self.extract_title_from_first_page(pdf_path)
+
+        # Sanitize title for use as filename
+        safe_title = self.sanitize_filename(title)
 
         # Extract text
         text = self.extract_text_from_pdf(pdf_path)
 
-        # Parse recipe
+        # Parse recipe (this may refine the title if needed)
         recipe_data = self.parse_recipe_text(text)
 
-        # Extract images
-        images = self.extract_images_from_pdf(pdf_path, recipe_name)
+        # Use extracted title if parsing found a different one
+        final_title = recipe_data.get('title', title)
+
+        # Extract images using the sanitized title for naming
+        images = self.extract_images_from_pdf(pdf_path, safe_title)
 
         # Combine all data
         recipe = {
             'filename': os.path.basename(pdf_path),
-            'title': recipe_data.get('title', recipe_name),
+            'title': final_title,
             'ingredients': recipe_data.get('ingredients', []),
             'instructions': recipe_data.get('instructions', []),
             'main_image': images[0] if images else None,
