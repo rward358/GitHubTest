@@ -51,7 +51,7 @@ class RecipeExtractor:
     def extract_title_from_first_page(self, pdf_path: str) -> str:
         """
         Extract the recipe title from the first page.
-        Looks for bold text at the top of the page.
+        Looks for largest font text at the top of the page.
         """
         if not fitz:
             # Fallback to simple text extraction
@@ -65,9 +65,9 @@ class RecipeExtractor:
 
             first_page = doc[0]
 
-            # Method 1: Look for bold text using font information
+            # Look for text using font information, prioritize by size
             blocks = first_page.get_text("dict")["blocks"]
-            bold_texts = []
+            candidate_texts = []
 
             for block in blocks:
                 if "lines" in block:
@@ -77,28 +77,31 @@ class RecipeExtractor:
                             font = span.get("font", "").lower()
                             size = span.get("size", 0)
 
-                            # Check if font is bold (contains "bold" in name)
-                            # and text is substantial (not just punctuation)
+                            # Collect substantial text (not just punctuation)
                             if text and len(text) > 3:
                                 is_bold = "bold" in font or "heavy" in font or "black" in font
-                                is_large = size > 12  # Larger font size
+                                y_position = span.get("bbox", [0, 0, 0, 0])[1]
 
-                                if is_bold or is_large:
-                                    y_position = span.get("bbox", [0, 0, 0, 0])[1]
-                                    bold_texts.append({
-                                        'text': text,
-                                        'size': size,
-                                        'y_pos': y_position,
-                                        'is_bold': is_bold
-                                    })
+                                candidate_texts.append({
+                                    'text': text,
+                                    'size': size,
+                                    'y_pos': y_position,
+                                    'is_bold': is_bold
+                                })
 
-            # Sort by y-position (top to bottom) and size (largest first)
-            if bold_texts:
-                bold_texts.sort(key=lambda x: (x['y_pos'], -x['size']))
-                # Get the first (topmost, largest) bold text
-                title = bold_texts[0]['text']
-                doc.close()
-                return title
+            # Sort by y-position (top first), then by size (largest first)
+            # This prioritizes text at the top with large font size
+            if candidate_texts:
+                # Filter to only top portion of the page (first 20% by y-position)
+                if candidate_texts:
+                    max_y = max(c['y_pos'] for c in candidate_texts)
+                    top_candidates = [c for c in candidate_texts if c['y_pos'] < max_y * 0.3]
+
+                    if top_candidates:
+                        # From top candidates, get the one with largest font size
+                        title_candidate = max(top_candidates, key=lambda x: x['size'])
+                        doc.close()
+                        return title_candidate['text']
 
             # Method 2: Fallback - get first substantial line
             text = first_page.get_text()
@@ -238,6 +241,7 @@ class RecipeExtractor:
     def extract_ingredients_from_table(self, pdf_path: str) -> List[Dict[str, any]]:
         """
         Extract ingredients from a table on the second page of the PDF.
+        Handles multi-column tables with different serving sizes (2P, 3P, 4P).
         Returns a list of parsed ingredient dictionaries.
         """
         ingredients = []
@@ -268,9 +272,64 @@ class RecipeExtractor:
 
                 # Process the first/main table (usually the ingredient table)
                 for table in tables:
-                    for row in table:
-                        if row and any(cell for cell in row if cell):  # Skip empty rows
-                            # Join non-empty cells in the row to form ingredient line
+                    if not table or len(table) < 2:
+                        continue
+
+                    # Check if this is a multi-column table with serving sizes
+                    # Header row typically looks like: ['Ingredients', '2P', '3P', '4P']
+                    header_row = table[0] if table else []
+                    has_serving_columns = False
+                    serving_column_index = 1  # Default to second column (2P)
+
+                    # Detect if header has serving size columns (2P, 3P, 4P, etc.)
+                    if header_row:
+                        for idx, cell in enumerate(header_row):
+                            if cell and re.search(r'\d+P', str(cell), re.IGNORECASE):
+                                has_serving_columns = True
+                                # Use the first serving size column we find
+                                if serving_column_index == 1:  # Not yet set
+                                    serving_column_index = idx
+                                    # Extract the number of people from header (e.g., "2P" -> 2)
+                                    servings_match = re.search(r'(\d+)P', str(cell), re.IGNORECASE)
+
+                    # Process data rows
+                    for row in table[1:]:  # Skip header row
+                        if not row or not any(cell for cell in row if cell):  # Skip empty rows
+                            continue
+
+                        if has_serving_columns and len(row) > serving_column_index:
+                            # Multi-column table: extract ingredient name from first column,
+                            # amount from serving size column (typically 2P)
+                            ingredient_name = str(row[0]).strip() if row[0] else ""
+                            amount = str(row[serving_column_index]).strip() if row[serving_column_index] else ""
+
+                            # Clean up ingredient name (remove footnotes like "** 7)")
+                            ingredient_name = re.sub(r'\*+\s*\d+\)', '', ingredient_name).strip()
+                            ingredient_name = re.sub(r'\*+', '', ingredient_name).strip()
+
+                            # Skip if no ingredient name or if it's a header
+                            if not ingredient_name or self._is_table_header(ingredient_name):
+                                continue
+
+                            # Determine serving size from header or default to 2
+                            servings = 2  # Default
+                            if header_row and serving_column_index < len(header_row):
+                                header_cell = str(header_row[serving_column_index])
+                                servings_match = re.search(r'(\d+)P', header_cell, re.IGNORECASE)
+                                if servings_match:
+                                    servings = int(servings_match.group(1))
+
+                            # Combine amount and ingredient name for parsing
+                            # Format: "225g Halloumi (2P)"
+                            ingredient_line = f"{amount} {ingredient_name} ({servings}P)"
+
+                            parsed = self.parse_ingredient(ingredient_line)
+                            # Only add if we got a valid ingredient name
+                            if parsed['name'] and len(parsed['name']) > 2:
+                                ingredients.append(parsed)
+
+                        else:
+                            # Single column or simple table: join all cells
                             ingredient_line = ' '.join(str(cell).strip() for cell in row if cell and str(cell).strip())
 
                             # Skip header rows
@@ -282,6 +341,8 @@ class RecipeExtractor:
 
         except Exception as e:
             print(f"Error extracting table from {pdf_path}: {e}")
+            import traceback
+            traceback.print_exc()
             # Fallback to text-based extraction
             return self._parse_ingredients_from_text(self.extract_text_from_pdf(pdf_path))
 
