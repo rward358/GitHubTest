@@ -235,6 +235,79 @@ class RecipeExtractor:
 
         return text
 
+    def extract_ingredients_from_table(self, pdf_path: str) -> List[Dict[str, any]]:
+        """
+        Extract ingredients from a table on the second page of the PDF.
+        Returns a list of parsed ingredient dictionaries.
+        """
+        ingredients = []
+
+        if not pdfplumber:
+            print("pdfplumber not available, cannot extract table data")
+            return ingredients
+
+        try:
+            with pdfplumber.open(pdf_path) as pdf:
+                # Check if there's a second page (index 1)
+                if len(pdf.pages) < 2:
+                    print(f"Warning: {pdf_path} has less than 2 pages, cannot extract from page 2")
+                    return ingredients
+
+                second_page = pdf.pages[1]  # Index 1 = page 2
+
+                # Extract tables from the second page
+                tables = second_page.extract_tables()
+
+                if not tables:
+                    print(f"Warning: No tables found on page 2 of {pdf_path}")
+                    # Fallback to text extraction from page 2
+                    page_text = second_page.extract_text()
+                    if page_text:
+                        return self._parse_ingredients_from_text(page_text)
+                    return ingredients
+
+                # Process the first/main table (usually the ingredient table)
+                for table in tables:
+                    for row in table:
+                        if row and any(cell for cell in row if cell):  # Skip empty rows
+                            # Join non-empty cells in the row to form ingredient line
+                            ingredient_line = ' '.join(str(cell).strip() for cell in row if cell and str(cell).strip())
+
+                            # Skip header rows
+                            if ingredient_line and not self._is_table_header(ingredient_line):
+                                parsed = self.parse_ingredient(ingredient_line)
+                                # Only add if we got a valid ingredient name
+                                if parsed['name'] and len(parsed['name']) > 2:
+                                    ingredients.append(parsed)
+
+        except Exception as e:
+            print(f"Error extracting table from {pdf_path}: {e}")
+            # Fallback to text-based extraction
+            return self._parse_ingredients_from_text(self.extract_text_from_pdf(pdf_path))
+
+        return ingredients
+
+    @staticmethod
+    def _is_table_header(line: str) -> bool:
+        """Check if a line is likely a table header."""
+        line_lower = line.lower()
+        header_keywords = ['ingredient', 'amount', 'quantity', 'unit', 'item', 'description']
+        return any(keyword in line_lower for keyword in header_keywords)
+
+    def _parse_ingredients_from_text(self, text: str) -> List[Dict[str, any]]:
+        """Parse ingredients from plain text (fallback method)."""
+        ingredients = []
+        lines = [line.strip() for line in text.split('\n') if line.strip()]
+
+        for line in lines:
+            # Look for lines that might be ingredients (have quantities/units)
+            if re.search(r'\d+\s*(g|kg|cup|tbsp|tsp|oz|lb|ml|l|P)', line, re.IGNORECASE):
+                parsed = self.parse_ingredient(line)
+                if parsed['name'] and len(parsed['name']) > 2:
+                    ingredients.append(parsed)
+
+        return ingredients
+
     @staticmethod
     def parse_ingredient(ingredient_line: str) -> Dict[str, any]:
         """
@@ -418,31 +491,34 @@ class RecipeExtractor:
 
         # Extract title from first page (bold text at the top)
         title = self.extract_title_from_first_page(pdf_path)
+        print(f"  Title: {title}")
 
         # Sanitize title for use as filename
         safe_title = self.sanitize_filename(title)
 
-        # Extract text
+        # Extract ingredients from table on second page
+        print(f"  Extracting ingredients from page 2...")
+        ingredients = self.extract_ingredients_from_table(pdf_path)
+        print(f"  Found {len(ingredients)} ingredients")
+
+        # Extract full text for instructions and other data
         text = self.extract_text_from_pdf(pdf_path)
 
-        # Parse recipe (this may refine the title if needed)
+        # Parse recipe text for instructions (but use title from first page)
         recipe_data = self.parse_recipe_text(text)
-
-        # Use extracted title if parsing found a different one
-        final_title = recipe_data.get('title', title)
 
         # Extract images using the sanitized title for naming
         images = self.extract_images_from_pdf(pdf_path, safe_title)
 
-        # Combine all data
+        # Combine all data - use title from first page, ingredients from table
         recipe = {
             'filename': os.path.basename(pdf_path),
-            'title': final_title,
-            'ingredients': recipe_data.get('ingredients', []),
+            'title': title,  # Use title from first page consistently
+            'ingredients': ingredients,  # Use ingredients from table on page 2
             'instructions': recipe_data.get('instructions', []),
             'main_image': images[0] if images else None,
             'all_images': images,
-            'full_text': recipe_data.get('full_text', '')
+            'full_text': text
         }
 
         return recipe

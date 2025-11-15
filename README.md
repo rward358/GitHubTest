@@ -12,10 +12,11 @@ A Python tool that automatically extracts recipes, ingredients, images, and inst
   - Selects the largest, highest-quality image
   - Automatically excludes icons and ingredient photos
 - **Text Parsing**: Intelligently parses recipe text to identify:
-  - Recipe title
-  - Ingredients list with quantity, unit, and serving size extraction
+  - Recipe title from bold text on first page
+  - Ingredients from tables on second page
   - Step-by-step instructions
 - **Ingredient Analysis**: Advanced ingredient parsing that extracts:
+  - Ingredients from tables on page 2 of PDFs
   - Ingredient name
   - Quantity and unit (e.g., "200g", "1 cup")
   - Serving size (e.g., "2P" = 2 people)
@@ -252,17 +253,23 @@ conn.close()
 ## Notes
 
 - The tool works best with well-formatted recipe PDFs
+- **Recipe structure**: Expects PDFs with:
+  - Page 1: Recipe title in bold at the top
+  - Page 2: Ingredients table
 - **Title extraction**: Automatically identifies the recipe title by looking for bold, large text at the top of the first page
 - **Image naming**: Each image is named based on the extracted recipe title (e.g., "Chocolate_Cake.jpg")
 - **One image per recipe**: Only the largest, highest-quality image is extracted (>50KB, minimum 300x300 pixels)
 - **Ignores ingredient photos**: Small ingredient images and icons are automatically filtered out
+- **Ingredient extraction**: Extracts ingredients from tables on page 2 of the PDF
+  - Automatically detects and parses table structure
+  - Falls back to text parsing if no table found
 - **Ingredient parsing**: Supports various formats:
   - "200g chicken breast (2P)" → 100g per person
   - "1 cup flour" → parsed to quantity=1, unit="cup"
   - "1/2 tsp salt" → converts fractions to decimals
   - "2-3 cups rice" → averages ranges
 - **Serving notation**: Use "(2P)", "(4P)", etc. in your PDFs to indicate serving sizes
-- Recipe parsing uses pattern matching to identify ingredient and instruction sections
+- Recipe parsing uses pattern matching to identify instruction sections
 
 ## Troubleshooting
 
