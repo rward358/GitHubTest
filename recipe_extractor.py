@@ -235,6 +235,97 @@ class RecipeExtractor:
 
         return text
 
+    @staticmethod
+    def parse_ingredient(ingredient_line: str) -> Dict[str, any]:
+        """
+        Parse an ingredient line to extract quantity, unit, name, and serving size.
+
+        Examples:
+        - "200g chicken breast (2P)" -> {quantity: 200, unit: 'g', name: 'chicken breast', servings: 2}
+        - "1 cup flour" -> {quantity: 1, unit: 'cup', name: 'flour', servings: None}
+        - "2 tbsp olive oil (4P)" -> {quantity: 2, unit: 'tbsp', name: 'olive oil', servings: 4}
+        """
+        original_text = ingredient_line.strip()
+
+        # Extract serving size (e.g., "2P", "4P")
+        servings = None
+        servings_match = re.search(r'\((\d+)P\)', original_text, re.IGNORECASE)
+        if servings_match:
+            servings = int(servings_match.group(1))
+            # Remove serving info from line for easier parsing
+            ingredient_line = re.sub(r'\(\d+P\)', '', ingredient_line, flags=re.IGNORECASE).strip()
+
+        # Common units (order matters - match longer units first)
+        units = [
+            'tablespoon', 'tablespoons', 'tbsp', 'tbs',
+            'teaspoon', 'teaspoons', 'tsp',
+            'cup', 'cups',
+            'pound', 'pounds', 'lb', 'lbs',
+            'ounce', 'ounces', 'oz',
+            'kilogram', 'kilograms', 'kg',
+            'gram', 'grams', 'g',
+            'milligram', 'milligrams', 'mg',
+            'liter', 'liters', 'l',
+            'milliliter', 'milliliters', 'ml',
+            'fluid ounce', 'fl oz',
+            'pint', 'pints', 'pt',
+            'quart', 'quarts', 'qt',
+            'gallon', 'gallons', 'gal',
+            'piece', 'pieces', 'pc',
+            'clove', 'cloves',
+            'slice', 'slices',
+            'pinch', 'dash',
+            'handful',
+            'bunch'
+        ]
+
+        # Pattern to match quantity and unit
+        # Supports: "200g", "1 cup", "1/2 cup", "1.5 tbsp", "2-3 cups"
+        quantity_pattern = r'^\s*(\d+(?:[\.\/\-]\d+)?)\s*'
+        unit_pattern = '|'.join(re.escape(unit) for unit in units)
+
+        quantity = None
+        unit = None
+        name = ingredient_line
+
+        # Try to match quantity
+        qty_match = re.match(quantity_pattern, ingredient_line)
+        if qty_match:
+            qty_str = qty_match.group(1)
+            # Convert fractions and ranges to decimals
+            if '/' in qty_str:
+                parts = qty_str.split('/')
+                quantity = float(parts[0]) / float(parts[1]) if len(parts) == 2 else float(parts[0])
+            elif '-' in qty_str:
+                parts = qty_str.split('-')
+                quantity = sum(float(p) for p in parts) / len(parts)  # Average
+            else:
+                quantity = float(qty_str)
+
+            # Remove quantity from line
+            ingredient_line = ingredient_line[qty_match.end():].strip()
+
+            # Try to match unit
+            unit_match = re.match(f'^({unit_pattern})\\b', ingredient_line, re.IGNORECASE)
+            if unit_match:
+                unit = unit_match.group(1).lower()
+                # Remove unit from line
+                ingredient_line = ingredient_line[unit_match.end():].strip()
+
+        # The remaining text is the ingredient name
+        # Clean up common prefixes
+        name = re.sub(r'^(of\s+|to\s+)', '', ingredient_line.strip(), flags=re.IGNORECASE)
+        name = name.strip(',;.')
+
+        return {
+            'raw_text': original_text,
+            'quantity': quantity,
+            'unit': unit,
+            'name': name or original_text,
+            'servings': servings,
+            'quantity_per_person': quantity / servings if quantity and servings else None
+        }
+
     def parse_recipe_text(self, text: str) -> Dict[str, any]:
         """Parse recipe text to extract title, ingredients, and instructions."""
 
@@ -288,7 +379,8 @@ class RecipeExtractor:
                     # Remove bullets and numbering
                     line = re.sub(r'^[\d\.\-\*\•]+\s*', '', line)
                     if line:
-                        ingredients.append(line)
+                        parsed = self.parse_ingredient(line)
+                        ingredients.append(parsed)
 
             # Extract instructions
             inst_start = instruction_match.end()
@@ -307,7 +399,8 @@ class RecipeExtractor:
             for line in lines[1:]:  # Skip title
                 # Common ingredient patterns (amount + unit + ingredient)
                 if re.search(r'\d+\s*(cup|tbsp|tsp|oz|lb|g|kg|ml|l|pound|ounce|tablespoon|teaspoon)', line, re.IGNORECASE):
-                    ingredients.append(line)
+                    parsed = self.parse_ingredient(line)
+                    ingredients.append(parsed)
                 elif len(instructions) == 0 and len(line) > 20:
                     # Longer lines are likely instructions
                     instructions.append(line)
@@ -401,12 +494,17 @@ class RecipeDatabase:
             )
         ''')
 
-        # Create ingredients table
+        # Create ingredients table with parsed data
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS ingredients (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 recipe_id INTEGER,
-                ingredient TEXT NOT NULL,
+                raw_text TEXT NOT NULL,
+                ingredient_name TEXT,
+                quantity REAL,
+                unit TEXT,
+                servings INTEGER,
+                quantity_per_person REAL,
                 FOREIGN KEY (recipe_id) REFERENCES recipes (id)
             )
         ''')
@@ -454,9 +552,20 @@ class RecipeDatabase:
         # Insert ingredients
         for ingredient in recipe.get('ingredients', []):
             cursor.execute('''
-                INSERT INTO ingredients (recipe_id, ingredient)
-                VALUES (?, ?)
-            ''', (recipe_id, ingredient))
+                INSERT INTO ingredients (
+                    recipe_id, raw_text, ingredient_name, quantity,
+                    unit, servings, quantity_per_person
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+            ''', (
+                recipe_id,
+                ingredient.get('raw_text', ''),
+                ingredient.get('name', ''),
+                ingredient.get('quantity'),
+                ingredient.get('unit'),
+                ingredient.get('servings'),
+                ingredient.get('quantity_per_person')
+            ))
 
         # Insert instructions
         for idx, instruction in enumerate(recipe.get('instructions', []), 1):
@@ -490,9 +599,19 @@ class RecipeDatabase:
         for row in cursor.fetchall():
             recipe_id, filename, title, main_image, full_text, created_at = row
 
-            # Get ingredients
-            cursor.execute('SELECT ingredient FROM ingredients WHERE recipe_id = ?', (recipe_id,))
-            ingredients = [r[0] for r in cursor.fetchall()]
+            # Get ingredients with parsed data
+            cursor.execute('''
+                SELECT raw_text, ingredient_name, quantity, unit, servings, quantity_per_person
+                FROM ingredients WHERE recipe_id = ?
+            ''', (recipe_id,))
+            ingredients = [{
+                'raw_text': r[0],
+                'name': r[1],
+                'quantity': r[2],
+                'unit': r[3],
+                'servings': r[4],
+                'quantity_per_person': r[5]
+            } for r in cursor.fetchall()]
 
             # Get instructions
             cursor.execute('SELECT instruction FROM instructions WHERE recipe_id = ? ORDER BY step_number', (recipe_id,))
@@ -518,6 +637,128 @@ class RecipeDatabase:
 
         print(f"Exported {len(recipes_data)} recipes to {output_file}")
 
+    def create_ingredient_table(self, output_file: str = "ingredient_table.json"):
+        """
+        Create a comprehensive ingredient table showing all ingredients
+        across all recipes with amounts per person.
+        """
+        cursor = self.conn.cursor()
+
+        # Get all unique ingredient names
+        cursor.execute('''
+            SELECT DISTINCT LOWER(TRIM(ingredient_name)) as ingredient
+            FROM ingredients
+            WHERE ingredient_name IS NOT NULL AND ingredient_name != ''
+            ORDER BY ingredient
+        ''')
+
+        unique_ingredients = [r[0] for r in cursor.fetchall()]
+
+        # Build table data
+        ingredient_table = {}
+
+        for ingredient in unique_ingredients:
+            # Get all recipes that use this ingredient
+            cursor.execute('''
+                SELECT r.title, i.quantity, i.unit, i.servings, i.quantity_per_person, i.raw_text
+                FROM ingredients i
+                JOIN recipes r ON i.recipe_id = r.id
+                WHERE LOWER(TRIM(i.ingredient_name)) = ?
+            ''', (ingredient,))
+
+            recipes_data = []
+            for row in cursor.fetchall():
+                recipe_title, quantity, unit, servings, qty_per_person, raw_text = row
+                recipes_data.append({
+                    'recipe': recipe_title,
+                    'quantity': quantity,
+                    'unit': unit,
+                    'servings': servings,
+                    'quantity_per_person': qty_per_person,
+                    'raw_text': raw_text
+                })
+
+            if recipes_data:
+                ingredient_table[ingredient] = recipes_data
+
+        # Export to JSON
+        with open(output_file, 'w', encoding='utf-8') as f:
+            json.dump(ingredient_table, f, indent=2, ensure_ascii=False)
+
+        print(f"\nIngredient table created: {output_file}")
+        print(f"Total unique ingredients: {len(ingredient_table)}")
+
+        return ingredient_table
+
+    def print_ingredient_table(self):
+        """Print a formatted ingredient table to console."""
+        cursor = self.conn.cursor()
+
+        # Get all unique ingredient names
+        cursor.execute('''
+            SELECT DISTINCT LOWER(TRIM(ingredient_name)) as ingredient
+            FROM ingredients
+            WHERE ingredient_name IS NOT NULL AND ingredient_name != ''
+            ORDER BY ingredient
+        ''')
+
+        unique_ingredients = [r[0] for r in cursor.fetchall()]
+
+        print("\n" + "="*80)
+        print("INGREDIENT TABLE - Amounts Per Person")
+        print("="*80)
+
+        for ingredient in unique_ingredients:
+            # Get all recipes that use this ingredient
+            cursor.execute('''
+                SELECT r.title, i.quantity, i.unit, i.servings, i.quantity_per_person
+                FROM ingredients i
+                JOIN recipes r ON i.recipe_id = r.id
+                WHERE LOWER(TRIM(i.ingredient_name)) = ?
+            ''', (ingredient,))
+
+            recipes = cursor.fetchall()
+            if recipes:
+                print(f"\n{ingredient.upper()}:")
+                for recipe_title, quantity, unit, servings, qty_per_person in recipes:
+                    if qty_per_person:
+                        print(f"  {recipe_title}: {qty_per_person:.2f} {unit or ''} per person " +
+                              f"(Total: {quantity} {unit or ''} for {servings}P)")
+                    elif quantity and unit:
+                        print(f"  {recipe_title}: {quantity} {unit}")
+                    else:
+                        print(f"  {recipe_title}: (quantity not specified)")
+
+        print("\n" + "="*80)
+
+    def export_ingredient_csv(self, output_file: str = "ingredients.csv"):
+        """Export ingredients table to CSV format."""
+        import csv
+
+        cursor = self.conn.cursor()
+
+        # Get all ingredients with recipe info
+        cursor.execute('''
+            SELECT r.title, i.ingredient_name, i.quantity, i.unit,
+                   i.servings, i.quantity_per_person, i.raw_text
+            FROM ingredients i
+            JOIN recipes r ON i.recipe_id = r.id
+            WHERE i.ingredient_name IS NOT NULL AND i.ingredient_name != ''
+            ORDER BY i.ingredient_name, r.title
+        ''')
+
+        with open(output_file, 'w', newline='', encoding='utf-8') as csvfile:
+            writer = csv.writer(csvfile)
+            writer.writerow([
+                'Ingredient', 'Recipe', 'Quantity', 'Unit',
+                'Servings', 'Quantity Per Person', 'Raw Text'
+            ])
+
+            for row in cursor.fetchall():
+                writer.writerow(row)
+
+        print(f"Ingredient CSV exported: {output_file}")
+
     def close(self):
         """Close the database connection."""
         if self.conn:
@@ -530,6 +771,9 @@ def main():
     parser.add_argument('--output-dir', default='extracted_recipes', help='Output directory for extracted data')
     parser.add_argument('--db', default='recipes.db', help='Database file name')
     parser.add_argument('--export-json', action='store_true', help='Export database to JSON')
+    parser.add_argument('--ingredient-table', action='store_true', help='Create ingredient table with per-person amounts')
+    parser.add_argument('--ingredient-csv', action='store_true', help='Export ingredients to CSV')
+    parser.add_argument('--print-table', action='store_true', help='Print ingredient table to console')
 
     args = parser.parse_args()
 
@@ -562,6 +806,18 @@ def main():
     if args.export_json:
         json_file = args.db.replace('.db', '.json')
         db.export_to_json(json_file)
+
+    # Create ingredient table if requested
+    if args.ingredient_table:
+        db.create_ingredient_table('ingredient_table.json')
+
+    # Export to CSV if requested
+    if args.ingredient_csv:
+        db.export_ingredient_csv('ingredients.csv')
+
+    # Print ingredient table if requested
+    if args.print_table:
+        db.print_ingredient_table()
 
     # Print summary
     print("\n=== Summary ===")
