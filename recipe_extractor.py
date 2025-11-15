@@ -451,6 +451,15 @@ class RecipeExtractor:
         name = re.sub(r'^(of\s+|to\s+)', '', ingredient_line.strip(), flags=re.IGNORECASE)
         name = name.strip(',;.')
 
+        # Remove any leading/trailing numbers and clean up the name
+        # Keep only letters, spaces, hyphens, apostrophes, and parentheses (for variations)
+        name = re.sub(r'^\d+\s*', '', name)  # Remove leading numbers
+        name = re.sub(r'\s*\d+$', '', name)  # Remove trailing numbers
+        name = re.sub(r'\s+', ' ', name).strip()  # Normalize whitespace
+
+        # Remove any remaining standalone numbers
+        name = ' '.join(word for word in name.split() if not word.isdigit())
+
         return {
             'raw_text': original_text,
             'quantity': quantity,
@@ -979,6 +988,76 @@ class RecipeDatabase:
 
         print(f"Ingredient CSV exported: {output_file}")
 
+    def export_ingredient_matrix_csv(self, output_file: str = "ingredient_matrix.csv"):
+        """
+        Export ingredients in a matrix/pivot table format.
+        Rows = ingredients (sorted alphabetically)
+        Columns = recipe names
+        Cells = quantity + unit (or empty if recipe doesn't use that ingredient)
+        """
+        import csv
+
+        cursor = self.conn.cursor()
+
+        # Get all unique recipes
+        cursor.execute('SELECT id, title FROM recipes ORDER BY title')
+        recipes = cursor.fetchall()
+        recipe_ids = {r[0]: r[1] for r in recipes}
+        recipe_titles = [r[1] for r in recipes]
+
+        # Get all unique ingredient names (lowercase for consistency)
+        cursor.execute('''
+            SELECT DISTINCT LOWER(TRIM(ingredient_name)) as ingredient
+            FROM ingredients
+            WHERE ingredient_name IS NOT NULL AND ingredient_name != ''
+            ORDER BY ingredient
+        ''')
+        unique_ingredients = [r[0] for r in cursor.fetchall()]
+
+        # Build the matrix
+        matrix_data = []
+
+        for ingredient in unique_ingredients:
+            row = {'Ingredient': ingredient}
+
+            # For each recipe, find if it uses this ingredient
+            for recipe_id, recipe_title in recipe_ids.items():
+                cursor.execute('''
+                    SELECT quantity, unit
+                    FROM ingredients
+                    WHERE recipe_id = ? AND LOWER(TRIM(ingredient_name)) = ?
+                    LIMIT 1
+                ''', (recipe_id, ingredient))
+
+                result = cursor.fetchone()
+                if result:
+                    quantity, unit = result
+                    if quantity and unit:
+                        row[recipe_title] = f"{quantity}{unit}"
+                    elif quantity:
+                        row[recipe_title] = str(quantity)
+                    elif unit:
+                        row[recipe_title] = unit
+                    else:
+                        row[recipe_title] = "✓"  # Used but no quantity specified
+                else:
+                    row[recipe_title] = ""  # Not used in this recipe
+
+            matrix_data.append(row)
+
+        # Write to CSV
+        with open(output_file, 'w', newline='', encoding='utf-8') as csvfile:
+            fieldnames = ['Ingredient'] + recipe_titles
+            writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+
+            writer.writeheader()
+            for row in matrix_data:
+                writer.writerow(row)
+
+        print(f"\nIngredient matrix exported: {output_file}")
+        print(f"Format: Rows = {len(unique_ingredients)} ingredients, Columns = {len(recipe_titles)} recipes")
+        print("Empty cells indicate the recipe doesn't use that ingredient")
+
     def close(self):
         """Close the database connection."""
         if self.conn:
@@ -993,6 +1072,7 @@ def main():
     parser.add_argument('--export-json', action='store_true', help='Export database to JSON')
     parser.add_argument('--ingredient-table', action='store_true', help='Create ingredient table with per-person amounts')
     parser.add_argument('--ingredient-csv', action='store_true', help='Export ingredients to CSV')
+    parser.add_argument('--ingredient-matrix', action='store_true', help='Export ingredient matrix (rows=ingredients, columns=recipes)')
     parser.add_argument('--print-table', action='store_true', help='Print ingredient table to console')
 
     args = parser.parse_args()
@@ -1034,6 +1114,10 @@ def main():
     # Export to CSV if requested
     if args.ingredient_csv:
         db.export_ingredient_csv('ingredients.csv')
+
+    # Export ingredient matrix if requested
+    if args.ingredient_matrix:
+        db.export_ingredient_matrix_csv('ingredient_matrix.csv')
 
     # Print ingredient table if requested
     if args.print_table:

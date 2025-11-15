@@ -76,11 +76,14 @@ python recipe_extractor.py /path/to/pdfs --ingredient-table
 # Export ingredients to CSV
 python recipe_extractor.py /path/to/pdfs --ingredient-csv
 
+# Export ingredient matrix (organized by ingredient with recipes as columns)
+python recipe_extractor.py /path/to/pdfs --ingredient-matrix
+
 # Print ingredient table to console
 python recipe_extractor.py /path/to/pdfs --print-table
 
 # Combine multiple options
-python recipe_extractor.py /path/to/pdfs --export-json --ingredient-table --ingredient-csv --print-table
+python recipe_extractor.py /path/to/pdfs --export-json --ingredient-table --ingredient-csv --ingredient-matrix --print-table
 ```
 
 ### Command-line Arguments
@@ -91,6 +94,7 @@ python recipe_extractor.py /path/to/pdfs --export-json --ingredient-table --ingr
 - `--export-json`: Export the database to JSON format
 - `--ingredient-table`: Create ingredient table JSON with per-person amounts
 - `--ingredient-csv`: Export ingredients to CSV format
+- `--ingredient-matrix`: Export ingredient matrix CSV (rows=ingredients, columns=recipes, cells=quantities)
 - `--print-table`: Print formatted ingredient table to console
 
 ## Output Structure
@@ -104,10 +108,15 @@ After processing, you'll have:
    - `images` table: All extracted images
 
 2. **Extracted Images** (`extracted_recipes/images/`):
-   - Main dish photos from each recipe PDF
+   - Main dish photos from each recipe PDF (named by recipe title)
 
 3. **JSON Export** (optional):
-   - Complete database exported in JSON format
+   - `recipes.json`: Complete database exported in JSON format
+   - `ingredient_table.json`: Ingredient table with per-person amounts
+
+4. **CSV Exports** (optional):
+   - `ingredients.csv`: List format with all ingredients and recipe info
+   - `ingredient_matrix.csv`: Matrix format organized by ingredient (rows) with recipes as columns
 
 ## Database Schema
 
