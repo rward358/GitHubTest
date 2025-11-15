@@ -477,10 +477,93 @@ class RecipeDatabase:
         self.conn = None
         self.create_database()
 
+    def _migrate_database(self):
+        """Migrate from old database schema to new schema."""
+        cursor = self.conn.cursor()
+
+        print("Backing up old ingredients table...")
+        # Rename old table
+        cursor.execute("ALTER TABLE ingredients RENAME TO ingredients_old")
+
+        # Create new ingredients table with updated schema
+        cursor.execute('''
+            CREATE TABLE ingredients (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                recipe_id INTEGER,
+                raw_text TEXT NOT NULL,
+                ingredient_name TEXT,
+                quantity REAL,
+                unit TEXT,
+                servings INTEGER,
+                quantity_per_person REAL,
+                FOREIGN KEY (recipe_id) REFERENCES recipes (id)
+            )
+        ''')
+
+        # Try to migrate old data
+        print("Migrating ingredient data...")
+        try:
+            cursor.execute("""
+                INSERT INTO ingredients (recipe_id, raw_text, ingredient_name)
+                SELECT recipe_id, ingredient, ingredient FROM ingredients_old
+            """)
+            print(f"Migrated {cursor.rowcount} ingredients from old schema.")
+        except Exception as e:
+            print(f"Warning: Could not fully migrate old ingredient data: {e}")
+
+        # Drop old table
+        cursor.execute("DROP TABLE ingredients_old")
+
+        # Ensure other tables are created
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS recipes (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                filename TEXT,
+                title TEXT NOT NULL,
+                main_image TEXT,
+                full_text TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS instructions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                recipe_id INTEGER,
+                step_number INTEGER,
+                instruction TEXT NOT NULL,
+                FOREIGN KEY (recipe_id) REFERENCES recipes (id)
+            )
+        ''')
+
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS images (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                recipe_id INTEGER,
+                image_path TEXT,
+                FOREIGN KEY (recipe_id) REFERENCES recipes (id)
+            )
+        ''')
+
+        self.conn.commit()
+        print("Migration complete! Old ingredients preserved with parsed names only.")
+        print("Note: Quantity data from old schema was not preserved. Re-run extraction for full parsing.\n")
+
     def create_database(self):
         """Create the SQLite database schema."""
         self.conn = sqlite3.connect(self.db_path)
         cursor = self.conn.cursor()
+
+        # Check if we need to migrate from old schema
+        cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='ingredients'")
+        if cursor.fetchone():
+            # Table exists, check if it has the old schema
+            cursor.execute("PRAGMA table_info(ingredients)")
+            columns = {row[1] for row in cursor.fetchall()}
+            if 'raw_text' not in columns:
+                print("Detected old database schema. Migrating to new schema...")
+                self._migrate_database()
+                return
 
         # Create recipes table
         cursor.execute('''
