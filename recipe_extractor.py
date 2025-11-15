@@ -38,12 +38,19 @@ class RecipeExtractor:
         self.images_dir.mkdir(exist_ok=True)
 
     def extract_images_from_pdf(self, pdf_path: str, recipe_name: str) -> List[str]:
-        """Extract images from a PDF file."""
+        """
+        Extract the main dish image from a PDF file.
+
+        Filters out small ingredient photos and icons by looking for:
+        - Large file size (>50KB indicates a high-quality photo)
+        - Reasonable dimensions (minimum 300x300 pixels)
+        - Returns only the largest image (the main dish photo)
+        """
         if not fitz:
             print("PyMuPDF not available, skipping image extraction")
             return []
 
-        images = []
+        candidate_images = []
         try:
             doc = fitz.open(pdf_path)
 
@@ -57,27 +64,50 @@ class RecipeExtractor:
                     image_bytes = base_image["image"]
                     image_ext = base_image["ext"]
 
-                    # Save the largest image (likely the main dish photo)
-                    if len(image_bytes) > 10000:  # Filter small images
+                    # Get image dimensions
+                    width = base_image.get("width", 0)
+                    height = base_image.get("height", 0)
+                    file_size = len(image_bytes)
+
+                    # Filter criteria for main dish photos:
+                    # 1. File size > 50KB (filters out small ingredient icons)
+                    # 2. Minimum dimensions of 300x300 (ensures reasonable quality)
+                    # 3. Not extremely narrow or wide (filters out decorative elements)
+                    MIN_SIZE = 50000  # 50KB
+                    MIN_DIMENSION = 300
+                    aspect_ratio = width / height if height > 0 else 0
+
+                    if (file_size > MIN_SIZE and
+                        width >= MIN_DIMENSION and
+                        height >= MIN_DIMENSION and
+                        0.5 <= aspect_ratio <= 2.0):  # Reasonable aspect ratio
+
                         image_filename = f"{recipe_name}_page{page_num}_img{img_index}.{image_ext}"
                         image_path = self.images_dir / image_filename
 
                         with open(image_path, "wb") as img_file:
                             img_file.write(image_bytes)
 
-                        images.append(str(image_path))
+                        # Store with metadata for better selection
+                        candidate_images.append({
+                            'path': str(image_path),
+                            'size': file_size,
+                            'width': width,
+                            'height': height,
+                            'page': page_num
+                        })
 
             doc.close()
 
-            # Return the largest image (assumed to be the main dish photo)
-            if images:
-                largest_img = max(images, key=lambda x: os.path.getsize(x))
-                return [largest_img]
+            # Select the largest image by file size (best quality main dish photo)
+            if candidate_images:
+                largest_img = max(candidate_images, key=lambda x: x['size'])
+                return [largest_img['path']]
 
         except Exception as e:
             print(f"Error extracting images from {pdf_path}: {e}")
 
-        return images
+        return []
 
     def extract_text_from_pdf(self, pdf_path: str) -> str:
         """Extract text content from a PDF file."""

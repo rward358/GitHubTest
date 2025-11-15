@@ -5,7 +5,10 @@ A Python tool that automatically extracts recipes, ingredients, images, and inst
 ## Features
 
 - **Automatic PDF Processing**: Scans folders of recipe PDFs
-- **Image Extraction**: Extracts and saves the main dish photo from each recipe
+- **Smart Image Extraction**: Extracts the main dish photo while ignoring small ingredient images
+  - Filters by size (>50KB) and dimensions (300x300+)
+  - Selects the largest, highest-quality image
+  - Automatically excludes icons and ingredient photos
 - **Text Parsing**: Intelligently parses recipe text to identify:
   - Recipe title
   - Ingredients list
@@ -149,8 +152,9 @@ conn.close()
 ## Notes
 
 - The tool works best with well-formatted recipe PDFs
-- Images smaller than 10KB are filtered out (likely icons, not dish photos)
-- The largest image in each PDF is assumed to be the main dish photo
+- **Image filtering**: Only extracts large, high-quality images (>50KB, minimum 300x300 pixels)
+- **Ignores ingredient photos**: Small ingredient images and icons are automatically filtered out
+- The largest image by file size is selected as the main dish photo
 - Recipe parsing uses pattern matching to identify ingredient and instruction sections
 
 ## Troubleshooting
